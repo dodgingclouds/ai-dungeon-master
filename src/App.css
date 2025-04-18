@@ -5,9 +5,6 @@
   text-align: center;
 }
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
 
 .logo {
   height: 6em;

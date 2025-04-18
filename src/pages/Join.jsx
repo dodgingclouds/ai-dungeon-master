@@ -1,57 +1,69 @@
-// src/pages/Join.jsx
-import React, { useState } from 'react';
+// src/pages/Join.jsx (character selection added)
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { supabase } from '../supabaseClient';
 
 export default function Join() {
-  const [name, setName] = useState('');
   const [sessionId, setSessionId] = useState('');
+  const [characters, setCharacters] = useState([]);
+  const [selectedCharId, setSelectedCharId] = useState('');
   const navigate = useNavigate();
 
-  const handleJoin = (e) => {
-    e.preventDefault();
+  useEffect(() => {
+    const loadCharacters = async () => {
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError || !session?.user) return;
 
-    if (!name.trim() || !sessionId.trim()) return;
+      const { data, error } = await supabase
+        .from('characters')
+        .select('*')
+        .eq('user_id', session.user.id);
 
-    // Store player name
-    localStorage.setItem('playerName', name);
+      if (!error && data) {
+        setCharacters(data);
+      }
+    };
 
-    // Get current players for this session
-    const key = `players:${sessionId}`;
-    const existing = JSON.parse(localStorage.getItem(key) || '[]');
+    loadCharacters();
+  }, []);
 
-    // Add this player if not already there
-    if (!existing.includes(name)) {
-      localStorage.setItem(key, JSON.stringify([...existing, name]));
-    }
+  const handleJoin = () => {
+    const selectedChar = characters.find((c) => c.id === selectedCharId);
+    if (!selectedChar || !sessionId) return;
 
+    localStorage.setItem('playerName', selectedChar.name);
+    localStorage.setItem('characterId', selectedChar.id);
     navigate(`/session/${sessionId}`);
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center p-6">
-      <h1 className="text-3xl font-bold mb-6">Join a Game</h1>
-      <form onSubmit={handleJoin} className="space-y-4 w-full max-w-md">
-        <input
-          type="text"
-          placeholder="Your name"
-          className="w-full p-3 rounded-md bg-gray-800 text-white"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <input
-          type="text"
-          placeholder="Session ID"
-          className="w-full p-3 rounded-md bg-gray-800 text-white"
-          value={sessionId}
-          onChange={(e) => setSessionId(e.target.value)}
-        />
-        <button
-          type="submit"
-          className="w-full bg-blue-600 hover:bg-blue-500 p-3 rounded-md font-semibold"
-        >
-          Join Session
-        </button>
-      </form>
+    <div className="p-4 max-w-md mx-auto">
+      <h1 className="text-xl font-bold mb-4">Join a Session</h1>
+      <input
+        className="w-full p-2 border rounded mb-4"
+        placeholder="Session ID"
+        value={sessionId}
+        onChange={(e) => setSessionId(e.target.value)}
+      />
+      <select
+        className="w-full p-2 border rounded mb-4"
+        value={selectedCharId}
+        onChange={(e) => setSelectedCharId(e.target.value)}
+      >
+        <option value="">Select your character</option>
+        {characters.map((char) => (
+          <option key={char.id} value={char.id}>
+            {char.name} the {char.race} {char.class}
+          </option>
+        ))}
+      </select>
+      <button
+        className="w-full bg-green-600 text-white p-2 rounded"
+        disabled={!selectedCharId || !sessionId}
+        onClick={handleJoin}
+      >
+        Enter Session
+      </button>
     </div>
   );
 }
