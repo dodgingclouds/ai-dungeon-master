@@ -1,4 +1,4 @@
-﻿import systemPrompt from '../systemPrompt';
+﻿//import systemPrompt from '../systemPrompt';
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
@@ -24,6 +24,7 @@ export default function Session() {
   const loadMoreMessages = async (initial = false) => {
   const limit = 50;
   const offset = initial ? 0 : messageOffset + limit;
+  const [hasJoined, setHasJoined] = useState(false);
 
   const { data, error } = await supabase
     .from('messages')
@@ -46,10 +47,22 @@ export default function Session() {
   if (data.length > 0) {
     setOldestMessageId(data[0].id);
   }
+  } else {
+  setMessages(prev => [...data, ...prev]);
 }
 
 
   setMessageOffset(offset);
+};
+const [systemPromptText, setSystemPromptText] = useState('');
+
+const loadSystemPrompt = async () => {
+  const { data, error } = await supabase.from('system_prompt').select('content').order('last_updated', { ascending: false }).limit(1).single();
+  if (error) {
+    console.error('❌ Failed to load system prompt:', error.message);
+  } else {
+    setSystemPromptText(data.content);
+  }
 };
 
 
@@ -68,12 +81,16 @@ export default function Session() {
       if (gameTime) {
         console.log(`🕰️ Game time loaded: Day ${gameTime.day}, ${gameTime.hour}:${gameTime.minute.toString().padStart(2, '0')}`);
       }
+      
+
     };
 
     loadWorld();
   }, []);
 
   useEffect(() => {
+      loadSystemPrompt();
+
     const name = localStorage.getItem('playerName') || 'Unnamed Hero';
     setPlayerName(name);
 
@@ -101,6 +118,7 @@ export default function Session() {
             setRoomPlayers(othersInRoom.map((c) => c.name));
           });
       }
+
     });
 
 
@@ -187,30 +205,6 @@ const handleScroll = () => {
   const handleSend = async () => {
     if (!input.trim()) return;
 
-    const moveMatch = input.match(/^(go|walk|move|approach|head|run) (?:to |towards )?(.*)$/i);
-    if (moveMatch) {
-      const destination = moveMatch[2].trim().toLowerCase();
-      const rooms = Object.entries(world.map || {}).map(([name, data]) => ({ name, ...data }));
-      const targetRoom = rooms.find(r => r.name.toLowerCase() === destination);
-
-      if (targetRoom) {
-        await supabase.from('characters').update({ location: targetRoom.name, position: 'center' }).eq('id', character.id);
-        console.log(`📍 Moved ${character.name} to new room: ${targetRoom.name}`);
-      } else {
-        await supabase.from('characters').update({ position: destination }).eq('id', character.id);
-        console.log(`📍 Moved within room to position: ${destination}`);
-      }
-
-      const { data: updatedChar, error: fetchError } = await supabase.from('characters').select('*').eq('id', character.id).single();
-      if (updatedChar) {
-        setCharacter(updatedChar);
-        setLocation(updatedChar.location);
-        console.log('✅ Character refreshed:', updatedChar);
-      } else {
-        console.error('❌ Failed to fetch updated character:', fetchError?.message);
-      }
-    }
-
     const { error } = await supabase.from('messages').insert({ session_id: id, sender: playerName, text: input });
     if (!error) {
       setInput('');
@@ -225,16 +219,26 @@ const handleScroll = () => {
       const visibleThings = currentRoom?.senses?.sight?.join(', ') || 'nothing notable';
       const audibleThings = currentRoom?.senses?.sound?.join(', ') || 'no sounds';
       const smellThings = currentRoom?.senses?.smell?.join(', ') || 'no smells';
+      // ✨ NEW: Fetch NPCs in the same room
+const { data: nearbyNpcsData, error: nearbyNpcsError } = await supabase
+  .from('npcs')
+  .select('*')
+  .eq('current_location', character.location);
 
-      const prompt = systemPrompt(
-        character,
-        world,
-        playerPosition,
-        eventMessages,
-        visibleThings,
-        audibleThings,
-        smellThings
-      );
+const nearbyNpcs = nearbyNpcsData || [];
+
+
+      const filledPrompt = systemPromptText
+  .replace('${character.location}', character.location)
+  .replace('${playerPosition}', character.position || 'center')
+  .replace('${roomDescription}', currentRoom?.description || '')
+  .replace('${roomExits}', Object.keys(currentRoom?.exits || {}).join(', '))
+  .replace('${visibleThings}', visibleThings)
+  .replace('${audibleThings}', audibleThings)
+  .replace('${smellThings}', smellThings)
+  .replace('${eventMessages}', eventMessages.join('\n') || 'None')
+  .replace('${npcsHere}', npcsHere); // npcsHere should be generated as before
+
 
       try {
         const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -246,7 +250,7 @@ const handleScroll = () => {
           body: JSON.stringify({
             model: 'gpt-4',
             messages: [
-              { role: 'system', content: prompt },
+              { role: 'system', content: filledPrompt },
               { role: 'user', content: input },
             ],
           }),
@@ -271,6 +275,16 @@ const handleScroll = () => {
             if (parsed.action === 'update_character' && parsed.updates) {
               await supabase.from('characters').update(parsed.updates).eq('id', character.id);
               console.log('✅ Character updated in Supabase:', parsed.updates);
+              const { data: updatedChar } = await supabase
+        .from('characters')
+        .select('*')
+        .eq('id', character.id)
+        .single();
+      if (updatedChar) {
+        setCharacter(updatedChar);
+        setLocation(updatedChar.location);
+        console.log('♻️ Refreshed character after move:', updatedChar);
+      }
             }
           } catch (e) {
             console.error('❌ Failed to parse AI action JSON:', e.message);
@@ -303,29 +317,66 @@ const handleScroll = () => {
     loadMoreMessages(true);
   }
 }, [id]);
+// Add this below your loadMoreMessages useEffect
+useEffect(() => {
+  if (!world) return;
+
+  const tickInterval = setInterval(async () => {
+    try {
+      const newWorld = { ...world };
+
+      if (!newWorld.time) {
+        console.warn('🌎 No time found in world_state');
+        return;
+      }
+
+      // Advance game clock: 2 game hours = 5 real hours → ~150 seconds = 1 game minute
+      newWorld.time.minute += 10; // 10 in-game minutes every interval
+
+      if (newWorld.time.minute >= 60) {
+        newWorld.time.minute -= 60;
+        newWorld.time.hour += 1;
+      }
+      if (newWorld.time.hour >= 24) {
+        newWorld.time.hour = 0;
+        newWorld.time.day += 1;
+      }
+
+      // Save to Supabase
+      const { error } = await supabase
+        .from('world_state')
+        .update({ data: newWorld })
+        .eq('id', 'main');
+
+      if (error) {
+        console.error('❌ Failed to update world time:', error.message);
+      } else {
+        console.log('🕰️ World time updated:', newWorld.time);
+        setWorld(newWorld);
+      }
+    } catch (err) {
+      console.error('❌ Error during world tick:', err);
+    }
+  }, 15000); // Every 15 seconds real time = 10 in-game minutes (adjust if you want slower)
+
+  return () => clearInterval(tickInterval);
+}, [world]);
+
 
 
   useEffect(() => {
     console.log('👀 Character:', character);
     console.log('📨 Messages:', messages);
   }, [character, messages]);
-
-    useEffect(() => {
+  useEffect(() => {
   const container = messageBoxRef.current;
-  if (!container) return;
-
-  const handle = () => {
-    if (container.scrollTop < 50 && hasMoreMessages) {
-      loadOlderMessages();
-    }
-  };
-
-  container.addEventListener('scroll', handle);
-  return () => container.removeEventListener('scroll', handle);
-}, [hasMoreMessages, messageOffset]);
+  if (container) {
+    container.scrollTop = container.scrollHeight;
+  }
+}, [messages]);
 
 
-
+    
   return (
     <div className="min-h-screen bg-yellow-50 text-amber-900 font-serif" style={{ backgroundImage: "url('/images/Revbegins.png')", backgroundSize: 'cover', backgroundPosition: 'center', backgroundRepeat: 'no-repeat' }}>
       <header className="flex items-center justify-center relative p-4 border-b bg-white shadow">
@@ -366,9 +417,10 @@ const handleScroll = () => {
 
         <div className="w-2/5 h-[400px] mx-4 bg-amber-50 border-4 border-amber-700 rounded-lg shadow-lg p-4 flex flex-col">
   <div
-    ref={messageBoxRef}
-    className="flex-1 overflow-y-auto mb-2 flex flex-col justify-end"
-  >
+  ref={messageBoxRef}
+  onScroll={handleScroll}
+  className="overflow-y-auto h-full mb-2 flex flex-col"
+>
 
   {messages.map((msg, idx) => (
     <div key={idx} className="text-sm">
